@@ -1,0 +1,171 @@
+########################################
+# 作成するシェルの説明
+########################################
+
+# 以下のようにしてAWRレポートを自動出力する
+# 
+# report_awr.sh
+# 　→sqlplusでOS認証でローカル接続し、auto_awrrpt.sqlを呼び出す
+# 　　→db_config.sqlで変数をセット（引数にレポートファイル名をフルパスで指定する）
+# 　　　その他変数をセット
+# 　　　→@?rdbms/admin/awrgrpti.sqlを実行
+
+
+########################################
+# 1) db_config.sqlの作成
+########################################
+
+mkdir /var/tmp/benchmark
+cd /var/tmp/benchmark
+pwd
+ls -l
+
+
+cat << 'EOF' > db_config.sql
+REM 
+REM db_config.sql の説明
+REM   sqlスクリプト上で使用する置換変数を定義するファイル
+REM   @?rdbms/admin/awrgrpti.sqlを実行する際に必要な変数を事前に宣言
+REM   ★は環境や目的に応じて変更する箇所
+REM 
+
+REM ★ターゲットのPDBの名前を定義する。（CDB全体のレポートの場合は指定しなくてもいい→''）
+REM   ※非CDBなら空文字列（''）にすること
+define  pdb_name = 'pdb';
+
+REM awrレポートのファイル名の指定（db_config.sqlの引数で指定）
+define  report_name = '&1'
+
+REM 表示する日数の指定用。日対話形式にするため、1から変更不要
+define  num_days = 1;
+
+REM 'ALL'か対象とするインスタンス番号をカンマ区切りで記入（RACの場合）
+define  instance_numbers_or_ALL = '1,2'
+
+REM レポート形式を指定（'html'か'text'か'active-html'）特にRAC構成の場合はHTMLを推奨
+define  report_type = 'html';
+
+REM ★awrスナップショットの位置の指定（12.2以降のPDBの場合指定必須）
+REM   AWR_ROOT - Use AWR data from root (default) ←CDB全体のレポートの場合
+REM   AWR_PDB - Use AWR data from PDB ←PDBのレポートの場合はこちらを指定
+define  awr_location = 'AWR_PDB'
+
+EOF
+
+
+########################################
+# 2) auto_awrrpt.sqlの作成
+########################################
+
+
+cat << 'EOF' > auto_awrrpt.sql
+set verify off
+
+@@db_config.sql
+
+REM ####################################
+REM # PDBに接続する
+REM ####################################
+
+DECLARE
+  pdb_flag varchar(60);
+BEGIN
+  pdb_flag := '&pdb_name';
+  
+  -- PDB_NAMEが空文字''でない場合にのみalter session文を実行
+  if (pdb_flag IS NOT NULL) THEN
+    DBMS_OUTPUT.PUT_LINE('alter session set container=&pdb_name');
+    EXECUTE IMMEDIATE 'alter session set container=&pdb_name';
+  END IF;
+END;
+/
+
+
+REM ####################################
+REM # dbidを取得する
+REM ####################################
+
+COLUMN con_dbid NEW_VALUE dbid NOPRINT;
+SELECT con_dbid FROM v$database;
+
+
+REM ####################################
+REM # begin_snapとend_snapを取得する
+REM ####################################
+
+REM 最新のsnapIDを取得してend_snapにする
+COLUMN begin_snap_id NEW_VALUE begin_snap NOPRINT;
+COLUMN end_snap_id   NEW_VALUE end_snap   NOPRINT;
+
+SELECT
+  MAX(snap_id) AS end_snap_id
+, MAX(snap_id) - 1 AS begin_snap_id
+FROM
+  dba_hist_snapshot
+WHERE
+  dbid = &dbid;
+
+REM ####################################
+REM # awrgrpti.sqlを実行
+REM ####################################
+
+@?/rdbms/admin/awrgrpti.sql
+
+exit
+
+EOF
+
+
+
+
+########################################
+# 3) report_awr.shの作成
+########################################
+
+cat << 'EOF' > report_awr.sh
+#!/bin/bash
+source bench_config
+
+sqlplus / as sysdba @auto_awrrpt.sql $LOG_DIR
+
+EOF
+
+chmod +x report_awr.sh
+
+
+
+########################################
+# 捕捉) bench_configやmkdir.shについて
+########################################
+
+cat << 'EOF' > bench_config
+export BENCH_DIR=/var/tmp/benchmark
+export LOG_TOP_DIR=/var/tmp/log
+EOF
+
+
+cat << 'EOF' > mkdir.sh
+#!/bin/bash
+source bench_config
+
+export LOG_DIR=$LOG_TOP_DIR/`date +%Y%m%d_%H%M`
+echo 'mkdir '$LOG_DIR
+mkdir $LOG_DIR
+EOF
+
+
+chmod +x mkdir.sh
+
+# 無事ファイルを作成できることを確認（特にファイルの実行権限を確認する）
+ls -l
+
+
+########################################
+# 捕捉) 実行方法
+########################################
+
+# sourceコマンドで$LOG_DIRを環境変数として取り出す
+source mkdir.sh
+
+./report_awr.sh
+
